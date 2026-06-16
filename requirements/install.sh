@@ -74,7 +74,7 @@ GITHUB_PREFIX=""
 NO_ROOT=0
 NO_INSTALL_RLINF_CMD="--no-install-project"
 SUPPORTED_TARGETS=("embodied" "agentic" "docs")
-SUPPORTED_MODELS=("openvla" "openvla-oft" "openpi" "gr00t" "gr00t_n1d6" "gr00t_n1d7" "dexbotic" "starvla" "lingbotvla" "dreamzero" "qwen3_vl" "abot_m0")
+SUPPORTED_MODELS=("openvla" "openvla-oft" "openpi" "gr00t" "gr00t_n1d6" "gr00t_n1d7" "dexbotic" "starvla" "lingbotvla" "dreamzero" "fastwam" "qwen3_vl" "abot_m0")
 SUPPORTED_ENVS=("behavior" "maniskill_libero" "libero" "metaworld" "calvin" "isaaclab" "robocasa" "franka" "franka-dexhand" "franka-franky" "frankasim" "robotwin" "habitat" "opensora" "wan" "genesis" "xsquare_turtle2" "liberopro" "liberoplus" "roboverse" "embodichain" "d4rl" "dosw1" "gim_arm" "dummy" "polaris")
 
 #=======================Utility Functions=======================
@@ -1418,6 +1418,42 @@ install_dreamzero_model() {
     esac
 }
 
+install_fastwam_model() {
+    case "$ENV_NAME" in
+        robotwin)
+            create_and_sync_venv
+            install_common_embodied_deps
+            install_${ENV_NAME}_env
+            uv pip install -r $SCRIPT_DIR/embodied/models/fastwam.txt
+            fastwam_path=$(clone_or_reuse_repo FASTWAM_PATH "$VENV_DIR/FastWAM" https://github.com/yuantianyuan01/FastWAM.git --depth 1)
+            uv pip install -e "$fastwam_path" --no-deps
+            install_flash_attn
+            ;;
+        libero)
+            create_and_sync_venv
+            install_common_embodied_deps
+            install_${ENV_NAME}_env
+            uv pip install -r $SCRIPT_DIR/embodied/models/fastwam.txt
+            fastwam_path=$(clone_or_reuse_repo FASTWAM_PATH "$VENV_DIR/FastWAM" https://github.com/yuantianyuan01/FastWAM.git --depth 1)
+            uv pip install -e "$fastwam_path" --no-deps
+            uv pip install mujoco==3.3.2
+            install_flash_attn
+            ;;
+        "")
+            create_and_sync_venv
+            install_common_embodied_deps
+            uv pip install -r $SCRIPT_DIR/embodied/models/fastwam.txt
+            fastwam_path=$(clone_or_reuse_repo FASTWAM_PATH "$VENV_DIR/FastWAM" https://github.com/yuantianyuan01/FastWAM.git --depth 1)
+            uv pip install -e "$fastwam_path" --no-deps
+            install_flash_attn
+            ;;
+        *)
+            echo "Environment '$ENV_NAME' is not supported for FastWAM model." >&2
+            exit 1
+            ;;
+    esac
+}
+
 install_qwen3_vl_model() {
     create_and_sync_venv
     install_common_embodied_deps
@@ -2011,7 +2047,7 @@ main() {
                     echo "Unknown environment: $ENV_NAME. Supported environments: ${SUPPORTED_ENVS[*]}" >&2
                     exit 1
                 fi
-            elif [ "$MODEL" != "dreamzero" ]; then
+            elif [ "$MODEL" != "dreamzero" ] && [ "$MODEL" != "fastwam" ]; then
                 echo "--env must be specified when target=embodied." >&2
                 exit 1
             fi
@@ -2049,6 +2085,9 @@ main() {
                     ;;
                 dreamzero)
                     install_dreamzero_model
+                    ;;
+                fastwam)
+                    install_fastwam_model
                     ;;
                 qwen3_vl)
                     install_qwen3_vl_model

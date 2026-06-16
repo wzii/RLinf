@@ -110,6 +110,11 @@ def _register_builtin_models():
         from rlinf.models.embodiment.dreamzero import get_model
 
         return get_model(cfg, torch_dtype)
+    
+    def _build_fastwam(cfg: DictConfig, torch_dtype):f
+        from rlinf.models.embodiment.fastwam import get_model
+
+        return get_model(cfg, torch_dtype)
 
     def _build_gr00t_n1d6(cfg: DictConfig, torch_dtype):
         from rlinf.models.embodiment.gr00t import get_model
@@ -206,6 +211,12 @@ def _register_builtin_models():
     register_model(
         SupportedModel.DREAMZERO.value,
         _build_dreamzero,
+        category="embodied",
+        force=True,
+    )
+    register_model(
+        SupportedModel.FASTWAM.value,
+        _build_fastwam,
         category="embodied",
         force=True,
     )

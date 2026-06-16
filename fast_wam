@@ -1,0 +1,101 @@
+  下面是为你定制的路线图（目标：推理 + SFT，先 LIBERO）。我把它分成"骨架搭建"和"两条链路"，每一步都标了改哪个文件、抄
+  DreamZero 的哪里、为什么。
+
+  ---
+  FastWAM → RLinf 集成路线图
+
+  两条调用链先记在脑子里
+
+  RLinf 的 worker 最终只通过两个入口碰你的模型，你所有工作都是为了喂饱这两个入口：
+
+  ① 推理/评测链（rlinf/workers/rollout/hf/huggingface_worker.py:295）：
+  worker → policy.predict_action_batch(env_obs, mode) → (actions, result)
+
+  ② SFT 链（rlinf/workers/sft/fsdp_vla_sft_worker.py:87）：
+  worker → model(forward_type=ForwardType.SFT, data=batch) → {"loss": ...}
+           dataloader 来自 build_<model>_sft_dataloader(...)
+
+  DreamZero 把这两个都实现了（dreamzero_policy.py:261 的 predict_action_batch、:315 的
+  sft_forward），它就是你的逐行参照。
+
+  ---
+  阶段 0：骨架与注册（推理/SFT 共用，必须先做）
+
+  ▎ 目的：让 RLinf "认识" fastwam 这个名字，并能 import 到 FastWAM 的代码。
+
+  步骤 1 — 让 fastwam 包可被 import。 FastWAM 是 pip install -e . 出来的 fastwam 包。最干净的做法是把它当成 RLinf
+  的一个依赖装进去（而不是拷源码）。落点：requirements/install.sh（RLinf 有个 skill add-install-docker-ci-e2e
+  专门干这个）。DreamZero 依赖外部 groot 包，就是这个模式。
+
+  步骤 2 — 注册模型名字。 两处：
+  - rlinf/config.py:101 附近：加一行 SupportedModel.FASTWAM = SupportedModel.register("fastwam",
+  force=True)，并把它加进下面 EMBODIED_MODEL 那个集合（:111）。
+  - rlinf/models/__init__.py：仿照 _build_dreamzero（:109）写一个 _build_fastwam，再仿照 :206 的
+  register_model(SupportedModel.DREAMZERO...) 注册 FASTWAM。
+
+  做完这两步，配置里写 model_type: fastwam 就不会报"未知模型"了——但还没有实现，跑会报 NotImplementedError。这是预期的。
+
+  ---
+  阶段 A：打通推理/评测（LIBERO）
+
+  步骤 3 — 写 policy 适配器。 新建 rlinf/models/embodiment/fastwam/，对照 dreamzero/：
+  - __init__.py 的 get_model(cfg, torch_dtype)：实例化 FastWAM 模型 + load_checkpoint + 用 dataset_stats 建
+  normalizer，返回 policy 实例。这段逻辑 FastWAM 已经写好了——直接搬
+  FastWAM/experiments/robotwin/fastwam_policy/deploy_policy.py:318 的 get_model 和 WorldActionRobotWinPolicy.__init__。
+  - fastwam_policy.py 的 class FastWAMPolicy(BasePolicy)，实现 predict_action_batch。
+
+  步骤 4 —（真正的体力活）观测/动作对齐。 这是整件事最容易出错、最花时间的一步。
+  - 输入：RLinf 的 env_obs 格式是固定的（见 dreamzero_policy.py:262-272）：main_images [B,H,W,C]
+  uint8、wrist_images、states [B,D]、task_descriptions: list[str]。你要把它转成 FastWAM infer_action 要的格式（图像
+  tensor 归一化到 [-1,1]、proprio 经 normalizer、prompt 套 DEFAULT_PROMPT）。FastWAM 那侧的转换逻辑在
+  deploy_policy.py:221 的 _build_*_image_tensor 和 _normalize_state，以及 LIBERO 版
+  FastWAM/experiments/libero/eval_libero_single.py（到这步我们一起读它）。
+  - 输出：FastWAM 吐 [T, D] 动作 chunk，denormalize 后 reshape 成 RLinf 要的 actions [B, num_chunks, action_dim]，再按
+  dreamzero_policy.py:300 那样补一个 result dict（推理阶段 logprob/value 填 0 即可）。
+
+  步骤 5 — 写配置。 复制 examples/embodiment/config/libero_spatial_eval_dreamzero.yaml →
+  libero_spatial_eval_fastwam.yaml，把 model_type 改成 fastwam，填 checkpoint 路径、dataset_stats 路径，以及 FastWAM
+  的模型结构参数（来自 FastWAM/configs/model/fastwam.yaml）。
+
+  验收：bash examples/embodiment/eval_embodiment.sh libero_spatial_eval_fastwam 能跑出成功率。
+
+  ---
+  阶段 B：打通 SFT（LIBERO）
+
+  步骤 6 — 训练 forward。 在 FastWAMPolicy 里实现 forward(forward_type) 分发到 sft_forward(data)，返回 {"loss": ...}（见
+  dreamzero_policy.py:315）。loss 计算逻辑 FastWAM 训练脚本 FastWAM/scripts/train.py 里现成，搬过来即可。
+
+  步骤 7 — SFT 数据加载器。 新建 rlinf/data/datasets/fastwam/（对照 rlinf/data/datasets/dreamzero/），写
+  build_fastwam_sft_dataloader(...)，内部包一层 FastWAM 已有的 lerobot
+  dataset（FastWAM/src/fastwam/datasets/lerobot/）。然后在 rlinf/workers/sft/fsdp_vla_sft_worker.py:66 加一个 elif
+  SupportedModel.FASTWAM: 分支接上。
+
+  步骤 8 — SFT 配置 + FSDP 兼容。写一份 SFT config；注意 DreamZero 为 FSDP 做了
+  _promote_scalar_params_to_1d（dreamzero/__init__.py:57，FSDP 不支持 0 维参数）——FastWAM 若有标量参数也要同样处理。
+
+  ---
+  给你的总览表
+
+  ┌────────────────┬────────────────────────────────────┬────────────────────────────────────┐
+  │      步骤      │                文件                │          抄 DreamZero 的           │
+  ├────────────────┼────────────────────────────────────┼────────────────────────────────────┤
+  │ 1 安装         │ requirements/install.sh            │ groot 安装段                       │
+  ├────────────────┼────────────────────────────────────┼────────────────────────────────────┤
+  │ 2 注册         │ config.py, models/__init__.py      │ _build_dreamzero                   │
+  ├────────────────┼────────────────────────────────────┼────────────────────────────────────┤
+  │ 3 适配器       │ models/embodiment/fastwam/         │ dreamzero/                         │
+  ├────────────────┼────────────────────────────────────┼────────────────────────────────────┤
+  │ 4 obs 对齐     │ 同上 + 读 FastWAM eval 脚本        │ predict_action_batch               │
+  ├────────────────┼────────────────────────────────────┼────────────────────────────────────┤
+  │ 5 推理配置     │ examples/.../libero_*_fastwam.yaml │ libero_spatial_eval_dreamzero.yaml │
+  ├────────────────┼────────────────────────────────────┼────────────────────────────────────┤
+  │ 6 训练 forward │ fastwam_policy.py                  │ sft_forward                        │
+  ├────────────────┼────────────────────────────────────┼────────────────────────────────────┤
+  │ 7 SFT 数据     │ rlinf/data/datasets/fastwam/       │ data/datasets/dreamzero/           │
+  ├────────────────┼────────────────────────────────────┼────────────────────────────────────┤
+  │ 8 SFT 配置     │ examples/.../sft config            │ DreamZero SFT 配置                 │
+  └────────────────┴────────────────────────────────────┴────────────────────────────────────┘
+
+  ---
+  这是全景。按你"逐步"的要求，我建议我们从阶段 0（步骤 1–2，骨架注册）开始动手——它最简单、改动小，能让你立刻建立"RLinf
+  注册机制"的肌肉记忆，跑通后你会对整套机制有体感，再进阶段 A 的对齐难点就不慌了。

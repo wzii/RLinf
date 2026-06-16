@@ -91,6 +91,7 @@ SupportedModel.GR00T = SupportedModel.register("gr00t", force=True)
 SupportedModel.DEXBOTIC_PI = SupportedModel.register("dexbotic_pi", force=True)
 SupportedModel.DEXBOTIC_DM0 = SupportedModel.register("dexbotic_dm0", force=True)
 SupportedModel.DREAMZERO = SupportedModel.register("dreamzero", force=True)
+SupportedModel.FASTWAM = SupportedModel.register("fastwam", force=True)
 SupportedModel.CNN_POLICY = SupportedModel.register("cnn_policy", force=True)
 SupportedModel.FLOW_POLICY = SupportedModel.register("flow_policy", force=True)
 SupportedModel.CMA_POLICY = SupportedModel.register("cma", force=True)
@@ -117,6 +118,7 @@ EMBODIED_MODEL = set(
         SupportedModel.DEXBOTIC_PI,
         SupportedModel.DEXBOTIC_DM0,
         SupportedModel.DREAMZERO,
+        SupportedModel.FASTWAM
         SupportedModel.CNN_POLICY,
         SupportedModel.FLOW_POLICY,
         SupportedModel.CMA_POLICY,
@@ -1163,15 +1165,24 @@ def validate_sft_cfg(cfg: DictConfig) -> DictConfig:
             cfg.runner.val_check_interval = cfg.runner.get("val_check_interval", -1)
 
         model_type = cfg.actor.model.get("model_type", None)
-        if (
-            model_type is not None
-            and SupportedModel(model_type) == SupportedModel.DREAMZERO
-        ):
+        if model_type is None:
+            logging.warning("model_type is None")
+            return cfg
+        
+        if SupportedModel(model_type) == SupportedModel.DREAMZERO:
             from rlinf.models.embodiment.dreamzero.dreamzero_config import (
                 validate_dreamzero_sft_model_cfg,
             )
 
             cfg.actor.model = validate_dreamzero_sft_model_cfg(cfg.actor.model)
+        elif SupportedModel(model_type) == SupportedModel.FASTWAM:
+            from rlinf.models.embodiment.fastwam.fastwam_config import (
+                validate_fastwam_sft_model_cfg,
+            )
+
+            cfg.actor.model = validate_fastwam_sft_model_cfg(cfg.actor.model)
+        else:
+            logging.info(f"model_type: {model_type} doesn't need to get config from model ckpt")
 
     return cfg
 
