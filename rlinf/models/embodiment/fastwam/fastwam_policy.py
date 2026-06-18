@@ -27,13 +27,14 @@ than re-implementing the model, so behaviour matches the official repository.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Optional
 
 import numpy as np
 import torch
 import torch.nn as nn
 
 from rlinf.models.embodiment.base_policy import BasePolicy, ForwardType
+from rlinf.models.embodiment.fastwam import fastwam_rl as R
 
 # Upstream FastWAM. The prompt template and gripper helper are vendored here as
 # small constants to avoid importing the (non-packaged) ``experiments`` scripts.
@@ -81,11 +82,24 @@ class FastWAMPolicy(nn.Module, BasePolicy):
         infer_cfg: Resolved inference hyper-parameters (see :class:`FastWAMInferConfig`).
     """
 
-    def __init__(self, model: nn.Module, processor: Any, infer_cfg: "FastWAMInferConfig"):
+    def __init__(
+        self,
+        model: nn.Module,
+        processor: Any,
+        infer_cfg: "FastWAMInferConfig",
+        value_head: Optional[nn.Module] = None,
+        rl_cfg: Optional[dict] = None,
+    ):
         nn.Module.__init__(self)
         self.model = model
         self.processor = processor
         self.infer_cfg = infer_cfg
+        # Optional RL head + config (see fastwam_rl). When `value_head` is set the
+        # policy is RL-capable: predict_action_batch samples via the flow-SDE and
+        # returns prev_logprobs/prev_values, and default_forward replays the chain.
+        self.value_head = value_head
+        self.rl_cfg = dict(rl_cfg or {})
+        self._rl_noise_level = float(self.rl_cfg.get("noise_level", 0.1))
 
         # Cache the (single) merged action/state keys used by the processor.
         self._state_key = processor.shape_meta["state"][0]["key"]
@@ -159,6 +173,91 @@ class FastWAMPolicy(nn.Module, BasePolicy):
         action = action.to(dtype=torch.float32, device="cpu")
         return normalizer.backward(action).numpy()
 
+    # ------------------------------------------------------------------ RL helpers
+    @property
+    def is_rl(self) -> bool:
+        """RL-capable when a value head is attached (see get_model `rl`)."""
+        return self.value_head is not None
+
+    def _value(self, pooled: torch.Tensor) -> torch.Tensor:
+        """Value-head call, casting input to the head's param dtype; returns fp32 ``[B,1]``."""
+        head_dtype = next(self.value_head.parameters()).dtype
+        return self.value_head(pooled.to(head_dtype)).float()
+
+    def _build_rl_conditioning(self, main_img, wrist_img, state, task):
+        """Per-env conditioning for the flow-SDE: (image, context, context_mask)."""
+        image = self._build_input_image(main_img, wrist_img)
+        proprio = self._normalize_proprio(state).to(
+            device=self.device, dtype=self.torch_dtype
+        )
+        context, context_mask = self.model.encode_prompt(
+            DEFAULT_PROMPT.format(task=str(task))
+        )
+        context, context_mask = self.model._append_proprio_to_context(
+            context=context, context_mask=context_mask, proprio=proprio
+        )
+        return image, context, context_mask
+
+    def _postprocess_action(self, action_lat: torch.Tensor) -> np.ndarray:
+        """Denormalize a [1,T,D] action latent and apply LIBERO gripper convention."""
+        action = self._denormalize_action(action_lat)[0]  # [T, D]
+        action[..., -1] = action[..., -1] * 2 - 1
+        action = _invert_gripper_action(action)
+        if self.infer_cfg.binarize_gripper:
+            action[..., -1] = np.sign(action[..., -1])
+        return action[: self.infer_cfg.num_action_chunks]
+
+    @torch.no_grad()
+    def _rl_predict_action_batch(self, env_obs: dict, mode: str = "eval", **kwargs):
+        """RL rollout: flow-SDE sampling with per-step log-probs + value, recording
+        the denoise chain + observation needed to replay it during training."""
+        cfg = self.infer_cfg
+        nchunks = cfg.num_action_chunks
+        main_images = env_obs["main_images"]
+        wrist_images = env_obs.get("wrist_images")
+        states = env_obs["states"]
+        tasks = env_obs["task_descriptions"]
+        batch_size = int(main_images.shape[0])
+        deterministic = mode != "train"
+
+        chunks, logps, values = [], [], []
+        f_chains, f_di, f_img, f_ctx, f_mask = [], [], [], [], []
+        for i in range(batch_size):
+            image, context, context_mask = self._build_rl_conditioning(
+                main_images[i], None if wrist_images is None else wrist_images[i],
+                states[i], tasks[i],
+            )
+            action_lat, info = R.flow_sde_rollout(
+                self.model, image, context, context_mask,
+                action_horizon=cfg.action_horizon,
+                num_inference_steps=cfg.num_inference_steps,
+                noise_level=self._rl_noise_level,
+                deterministic=deterministic,
+            )
+            chunks.append(self._postprocess_action(action_lat))
+            di = info["denoise_ind"]
+            logps.append(info["logp_per_step"][:, di, :nchunks, :].float())
+            values.append(self._value(info["pooled_video_feat"]))
+            f_chains.append(info["chains"])
+            f_di.append(torch.tensor([di], device=self.device, dtype=torch.long))
+            f_img.append(image)
+            f_ctx.append(context)
+            f_mask.append(context_mask)
+
+        actions = np.stack(chunks, axis=0).astype(np.float32)
+        result = {
+            "prev_logprobs": torch.cat(logps, dim=0),
+            "prev_values": torch.cat(values, dim=0),
+            "forward_inputs": {
+                "chains": torch.cat(f_chains, dim=0),
+                "denoise_inds": torch.cat(f_di, dim=0),
+                "image": torch.cat(f_img, dim=0),
+                "context": torch.cat(f_ctx, dim=0),
+                "context_mask": torch.cat(f_mask, dim=0),
+            },
+        }
+        return actions, result
+
     # ------------------------------------------------------------------ rollout
     @torch.no_grad()
     def predict_action_batch(self, env_obs: dict, mode: str = "eval", **kwargs):
@@ -174,6 +273,9 @@ class FastWAMPolicy(nn.Module, BasePolicy):
             ``[B, num_action_chunks, action_dim]`` ready for ``env.chunk_step``;
             ``result`` is an (empty) metadata dict for the eval path.
         """
+        if self.is_rl:
+            return self._rl_predict_action_batch(env_obs, mode=mode, **kwargs)
+
         cfg = self.infer_cfg
         main_images = env_obs["main_images"]
         wrist_images = env_obs.get("wrist_images")
@@ -261,11 +363,59 @@ class FastWAMPolicy(nn.Module, BasePolicy):
                 out["action_loss"] = torch.as_tensor(metrics["loss_action"])
         return out
 
-    def default_forward(self, **kwargs):
-        raise NotImplementedError(
-            "FastWAMPolicy.default_forward is unused; rollout uses predict_action_batch "
-            "and SFT uses sft_forward."
-        )
+    def default_forward(
+        self,
+        forward_inputs: Any = None,
+        compute_logprobs: bool = True,
+        compute_values: bool = True,
+        compute_entropy: bool = False,
+        **kwargs,
+    ):
+        """RL training forward: replay the stored denoise chain and recompute the
+        sampled step's log-prob (+ entropy) and the state value under current params.
+
+        Returns ``{"logprobs":[B,nchunks,D], "values":[B,1], "entropy":[B,nchunks,D]}``
+        matching RLinf's PPO actor contract (see EmbodiedFSDPActor.train_micro_batch).
+        """
+        if not self.is_rl:
+            raise NotImplementedError(
+                "FastWAMPolicy.default_forward requires an RL value head; SFT uses sft_forward."
+            )
+        if forward_inputs is None:
+            raise ValueError("FastWAMPolicy.default_forward requires `forward_inputs`.")
+        cfg = self.infer_cfg
+        nchunks = cfg.num_action_chunks
+        chains = forward_inputs["chains"]
+        denoise_inds = forward_inputs["denoise_inds"]
+        image = forward_inputs["image"]
+        context = forward_inputs["context"]
+        context_mask = forward_inputs["context_mask"]
+        batch_size = int(chains.shape[0])
+
+        logps, ents, values = [], [], []
+        for b in range(batch_size):
+            logp_b, ent_b, pooled_b = R.recompute_logprob(
+                self.model,
+                input_image=image[b : b + 1],
+                context=context[b : b + 1],
+                context_mask=context_mask[b : b + 1],
+                chains=chains[b : b + 1],
+                denoise_ind=int(denoise_inds[b].item()),
+                action_horizon=cfg.action_horizon,
+                num_inference_steps=cfg.num_inference_steps,
+                noise_level=self._rl_noise_level,
+            )
+            logps.append(logp_b[:, :nchunks, :].float())
+            ents.append(ent_b[:, :nchunks, :].float())
+            values.append(self._value(pooled_b))
+
+        out = {
+            "logprobs": torch.cat(logps, dim=0),
+            "values": torch.cat(values, dim=0),
+        }
+        if compute_entropy:
+            out["entropy"] = torch.cat(ents, dim=0)
+        return out
 
     def gradient_checkpointing_enable(self, **kwargs):
         # FastWAM toggles gradient checkpointing through its DiT configs

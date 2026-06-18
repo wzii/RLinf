@@ -1,0 +1,42 @@
+# FastWAM RL (PPO) model config.
+#
+# Adds a value head + the flow-SDE RL config on top of the rollout/eval config.
+# PPO is run via rlinf/models/embodiment/fastwam/fastwam_rl.py: the action expert
+# is sampled as a flow-SDE (per-step Gaussian exploration -> tractable log-probs),
+# a value head reads the pooled (frozen) video conditioning, and only the ~1B
+# action expert (+ proprio + value head) is trained; the 5B video expert is frozen.
+model_type: "fastwam"
+precision: bf16
+model_path: /workspace/checkpoints/fastwam/libero_uncond_2cam224.pt
+is_lora: false
+
+checkpoint_path: /workspace/checkpoints/fastwam/libero_uncond_2cam224.pt
+dataset_stats_path: /workspace/checkpoints/fastwam/libero_uncond_2cam224_dataset_stats.json
+
+# Action chunking.
+action_dim: 7
+num_action_chunks: 10
+action_horizon: 32
+
+# Flow-matching / flow-SDE sampling.
+num_inference_steps: 10
+binarize_gripper: true
+text_cfg_scale: 1.0
+negative_prompt: ""
+sigma_shift: null
+seed: null
+rand_device: cpu
+tiled: false
+
+# RL head: attach a value head and train via PPO (actor_critic).
+add_value_head: true
+rl:
+  enabled: true
+  noise_level: 0.1          # flow-SDE exploration std scale (per denoise step)
+  freeze_video_expert: true # train only the action expert + proprio + value head
+
+fastwam:
+  config_dir: null
+  config_name: sim_libero
+  overrides:
+    - model.redirect_common_files=false

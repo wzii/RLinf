@@ -221,6 +221,41 @@ def get_model(cfg: DictConfig, torch_dtype=None) -> nn.Module:
         max_video_saves=int(cfg.get("max_video_saves", 12)),
     )
 
-    policy = FastWAMPolicy(model=model, processor=processor, infer_cfg=infer_cfg)
+    # ------------------------------------------------------------------ RL head
+    # When add_value_head / rl.enabled is set, attach a value head (PPO via the
+    # flow-SDE in fastwam_rl) and train only the ~1B action expert (+ proprio +
+    # value head), freezing the 5B video expert so single-GPU RL stays tractable.
+    rl = cfg.get("rl", {}) or {}
+    rl_enabled = bool(cfg.get("add_value_head", False)) or bool(rl.get("enabled", False))
+    value_head = None
+    rl_cfg = None
+    if rl_enabled:
+        from rlinf.models.embodiment.modules.value_head import ValueHead
+
+        value_dim = int(model.video_expert.hidden_dim)
+        value_head = ValueHead(input_dim=value_dim, activation="relu")
+        if bool(rl.get("freeze_video_expert", True)):
+            model.requires_grad_(False)
+            model.action_expert.requires_grad_(True)
+            if getattr(model, "proprio_encoder", None) is not None:
+                model.proprio_encoder.requires_grad_(True)
+        rl_cfg = {
+            "enabled": True,
+            "noise_level": float(rl.get("noise_level", 0.1)),
+            "freeze_video_expert": bool(rl.get("freeze_video_expert", True)),
+        }
+        logger.info(
+            "FastWAM RL enabled: value_head(input_dim=%d), noise_level=%.3f, "
+            "freeze_video_expert=%s", value_dim, rl_cfg["noise_level"],
+            rl_cfg["freeze_video_expert"],
+        )
+
+    policy = FastWAMPolicy(
+        model=model,
+        processor=processor,
+        infer_cfg=infer_cfg,
+        value_head=value_head,
+        rl_cfg=rl_cfg,
+    )
     policy = policy.to(dtype=torch_dtype)
     return policy
