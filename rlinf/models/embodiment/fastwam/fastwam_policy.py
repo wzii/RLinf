@@ -35,6 +35,9 @@ import torch.nn as nn
 
 from rlinf.models.embodiment.base_policy import BasePolicy, ForwardType
 from rlinf.models.embodiment.fastwam import fastwam_rl as R
+from rlinf.utils.logging import get_logger
+
+logger = get_logger()
 
 # Upstream FastWAM. The prompt template and gripper helper are vendored here as
 # small constants to avoid importing the (non-packaged) ``experiments`` scripts.
@@ -99,7 +102,26 @@ class FastWAMPolicy(nn.Module, BasePolicy):
         # returns prev_logprobs/prev_values, and default_forward replays the chain.
         self.value_head = value_head
         self.rl_cfg = dict(rl_cfg or {})
+        # RL-capable (flow-SDE sampling + logprobs) whenever RL is enabled, *independent*
+        # of whether a value head exists. Critic-free GRPO (adv_type=grpo, loss_type=actor)
+        # runs with value_head=None; PPO/GAE (actor_critic) additionally attaches one.
+        # NB: FastWAM's natural value features are inadequate for a critic -- the pre-DiT
+        # video "tokens" are a single Conv3d of the *current frame's* VAE latent, with no
+        # task/proprio/world-model conditioning (text+proprio live in `context`, fused only
+        # inside the DiT cross-attention) -- so GRPO is the recommended algorithm here.
+        self._rl_enabled = bool(self.rl_cfg.get("enabled", False)) or value_head is not None
         self._rl_noise_level = float(self.rl_cfg.get("noise_level", 0.1))
+        # "flow_sde" = principled reverse-SDE (default, matches OpenPI/GR00T);
+        # "simple" = legacy ODE-mean + constant-scale noise. See fastwam_rl.
+        self._rl_noise_method = str(self.rl_cfg.get("noise_method", "flow_sde"))
+        # Train the (otherwise frozen) video expert through the rebuilt conditioning.
+        self._rl_train_video_expert = bool(self.rl_cfg.get("train_video_expert", False))
+        # Process the whole env batch in one model forward when True; fall back to the
+        # per-env loop on any error (e.g. variable-length text context). See _rl_* below.
+        self._rl_batched = bool(self.rl_cfg.get("batched", True))
+        # Cap the rollout sub-batch through the frozen 5B video forward so peak memory is
+        # bounded independent of how many envs a worker holds (lets total_num_envs scale).
+        self._rl_rollout_chunk = int(self.rl_cfg.get("rollout_chunk", 8))
 
         # Cache the (single) merged action/state keys used by the processor.
         self._state_key = processor.shape_meta["state"][0]["key"]
@@ -176,7 +198,11 @@ class FastWAMPolicy(nn.Module, BasePolicy):
     # ------------------------------------------------------------------ RL helpers
     @property
     def is_rl(self) -> bool:
-        """RL-capable when a value head is attached (see get_model `rl`)."""
+        """RL-capable when RL is enabled (flow-SDE rollout), with or without a critic."""
+        return self._rl_enabled
+
+    @property
+    def has_value_head(self) -> bool:
         return self.value_head is not None
 
     def _value(self, pooled: torch.Tensor) -> torch.Tensor:
@@ -198,6 +224,34 @@ class FastWAMPolicy(nn.Module, BasePolicy):
         )
         return image, context, context_mask
 
+    def _build_rl_conditioning_batch(self, main_images, wrist_images, states, tasks):
+        """Stack per-env conditioning into a single batched (image, context, mask).
+
+        Raises if the text-context lengths differ across the batch (then the caller
+        falls back to the per-env loop). In practice FastWAM's ``encode_prompt`` pads to
+        a fixed T5 length, so this holds — the existing rollout path already relies on it
+        (it ``torch.cat``s the per-env contexts into ``forward_inputs``).
+        """
+        imgs, ctxs, masks = [], [], []
+        for i in range(len(tasks)):
+            image, context, context_mask = self._build_rl_conditioning(
+                main_images[i], None if wrist_images is None else wrist_images[i],
+                states[i], tasks[i],
+            )
+            imgs.append(image)
+            ctxs.append(context)
+            masks.append(context_mask)
+        lens = {int(c.shape[1]) for c in ctxs}
+        if len(lens) != 1:
+            raise ValueError(
+                f"variable text-context lengths {sorted(lens)} cannot be batched"
+            )
+        return (
+            torch.cat(imgs, dim=0),
+            torch.cat(ctxs, dim=0),
+            torch.cat(masks, dim=0),
+        )
+
     def _postprocess_action(self, action_lat: torch.Tensor) -> np.ndarray:
         """Denormalize a [1,T,D] action latent and apply LIBERO gripper convention."""
         action = self._denormalize_action(action_lat)[0]  # [T, D]
@@ -211,8 +265,6 @@ class FastWAMPolicy(nn.Module, BasePolicy):
     def _rl_predict_action_batch(self, env_obs: dict, mode: str = "eval", **kwargs):
         """RL rollout: flow-SDE sampling with per-step log-probs + value, recording
         the denoise chain + observation needed to replay it during training."""
-        cfg = self.infer_cfg
-        nchunks = cfg.num_action_chunks
         main_images = env_obs["main_images"]
         wrist_images = env_obs.get("wrist_images")
         states = env_obs["states"]
@@ -220,34 +272,73 @@ class FastWAMPolicy(nn.Module, BasePolicy):
         batch_size = int(main_images.shape[0])
         deterministic = mode != "train"
 
-        chunks, logps, values = [], [], []
-        f_chains, f_di, f_img, f_ctx, f_mask = [], [], [], [], []
-        for i in range(batch_size):
-            image, context, context_mask = self._build_rl_conditioning(
+        # Batched rollout in sub-batches of `_rl_rollout_chunk` so peak memory (the frozen
+        # 5B video forward) stays bounded no matter how many envs a worker holds -- this is
+        # what lets us scale total_num_envs for GRPO stability. Fall back to a per-env loop
+        # on ANY error (e.g. an upstream op that still rejects B>1).
+        if self._rl_batched and batch_size > 1:
+            try:
+                chunk = max(1, int(self._rl_rollout_chunk))
+                conds = []
+                for s in range(0, batch_size, chunk):
+                    e = min(s + chunk, batch_size)
+                    conds.append(self._build_rl_conditioning_batch(
+                        main_images[s:e],
+                        None if wrist_images is None else wrist_images[s:e],
+                        states[s:e], tasks[s:e],
+                    ))
+                return self._rl_rollout_from_conds(conds, deterministic)
+            except Exception as e:  # noqa: BLE001 — degrade to the safe per-env path
+                logger.warning(
+                    "FastWAM RL: batched rollout failed (%s); falling back to per-env loop.",
+                    e,
+                )
+
+        conds = [
+            self._build_rl_conditioning(
                 main_images[i], None if wrist_images is None else wrist_images[i],
                 states[i], tasks[i],
             )
+            for i in range(batch_size)
+        ]
+        return self._rl_rollout_from_conds(conds, deterministic)
+
+    def _rl_rollout_from_conds(self, conds, deterministic):
+        """Run flow-SDE rollout over a list of (image, context, mask) groups and assemble
+        the RLinf rollout result. Each group may carry any batch size (1 for per-env)."""
+        cfg = self.infer_cfg
+        nchunks = cfg.num_action_chunks
+        chunks, logps, values = [], [], []
+        f_chains, f_di, f_img, f_ctx, f_mask = [], [], [], [], []
+        for image, context, context_mask in conds:
             action_lat, info = R.flow_sde_rollout(
                 self.model, image, context, context_mask,
                 action_horizon=cfg.action_horizon,
                 num_inference_steps=cfg.num_inference_steps,
                 noise_level=self._rl_noise_level,
+                noise_method=self._rl_noise_method,
                 deterministic=deterministic,
             )
-            chunks.append(self._postprocess_action(action_lat))
-            di = info["denoise_ind"]
-            logps.append(info["logp_per_step"][:, di, :nchunks, :].float())
-            values.append(self._value(info["pooled_video_feat"]))
+            b = int(image.shape[0])
+            di = info["denoise_inds"].to(torch.long)  # [b]
+            ar = torch.arange(b, device=di.device)
+            # Each trajectory's log-prob at its own sampled denoise step.
+            logps.append(info["logp_per_step"][ar, di][:, :nchunks, :].float())
+            if self.has_value_head:
+                values.append(self._value(info["pooled_video_feat"]))
             f_chains.append(info["chains"])
-            f_di.append(torch.tensor([di], device=self.device, dtype=torch.long))
+            f_di.append(di)
             f_img.append(image)
             f_ctx.append(context)
             f_mask.append(context_mask)
+            for j in range(b):
+                chunks.append(self._postprocess_action(action_lat[j : j + 1]))
 
         actions = np.stack(chunks, axis=0).astype(np.float32)
         result = {
             "prev_logprobs": torch.cat(logps, dim=0),
-            "prev_values": torch.cat(values, dim=0),
+            # None for critic-free GRPO; the rollout worker tolerates a None value.
+            "prev_values": torch.cat(values, dim=0) if self.has_value_head else None,
             "forward_inputs": {
                 "chains": torch.cat(f_chains, dim=0),
                 "denoise_inds": torch.cat(f_di, dim=0),
@@ -379,7 +470,7 @@ class FastWAMPolicy(nn.Module, BasePolicy):
         """
         if not self.is_rl:
             raise NotImplementedError(
-                "FastWAMPolicy.default_forward requires an RL value head; SFT uses sft_forward."
+                "FastWAMPolicy.default_forward requires RL to be enabled; SFT uses sft_forward."
             )
         if forward_inputs is None:
             raise ValueError("FastWAMPolicy.default_forward requires `forward_inputs`.")
@@ -392,27 +483,53 @@ class FastWAMPolicy(nn.Module, BasePolicy):
         context_mask = forward_inputs["context_mask"]
         batch_size = int(chains.shape[0])
 
-        logps, ents, values = [], [], []
-        for b in range(batch_size):
+        want_values = compute_values and self.has_value_head
+
+        def _run(sl: slice):
             logp_b, ent_b, pooled_b = R.recompute_logprob(
                 self.model,
-                input_image=image[b : b + 1],
-                context=context[b : b + 1],
-                context_mask=context_mask[b : b + 1],
-                chains=chains[b : b + 1],
-                denoise_ind=int(denoise_inds[b].item()),
+                input_image=image[sl],
+                context=context[sl],
+                context_mask=context_mask[sl],
+                chains=chains[sl],
+                denoise_inds=denoise_inds[sl],
                 action_horizon=cfg.action_horizon,
                 num_inference_steps=cfg.num_inference_steps,
                 noise_level=self._rl_noise_level,
+                noise_method=self._rl_noise_method,
+                train_video_expert=self._rl_train_video_expert,
             )
-            logps.append(logp_b[:, :nchunks, :].float())
-            ents.append(ent_b[:, :nchunks, :].float())
-            values.append(self._value(pooled_b))
+            val_b = self._value(pooled_b) if want_values else None
+            return (
+                logp_b[:, :nchunks, :].float(),
+                ent_b[:, :nchunks, :].float(),
+                val_b,
+            )
 
-        out = {
-            "logprobs": torch.cat(logps, dim=0),
-            "values": torch.cat(values, dim=0),
-        }
+        use_batched = self._rl_batched and batch_size > 1
+        logps = ents = values = None
+        if use_batched:
+            try:
+                lp, ent, val = _run(slice(0, batch_size))
+                logps, ents, values = [lp], [ent], [val]
+            except Exception as e:  # noqa: BLE001 — degrade to the safe per-env path
+                logger.warning(
+                    "FastWAM RL: batched default_forward failed (%s); "
+                    "falling back to per-env loop.", e,
+                )
+                use_batched = False
+        if not use_batched:
+            logps, ents, values = [], [], []
+            for b in range(batch_size):
+                lp, ent, val = _run(slice(b, b + 1))
+                logps.append(lp)
+                ents.append(ent)
+                values.append(val)
+
+        out = {"logprobs": torch.cat(logps, dim=0)}
+        # values omitted for critic-free GRPO (values entries are None).
+        if want_values:
+            out["values"] = torch.cat(values, dim=0)
         if compute_entropy:
             out["entropy"] = torch.cat(ents, dim=0)
         return out

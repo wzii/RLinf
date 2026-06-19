@@ -33,7 +33,14 @@ add_value_head: true
 rl:
   enabled: true
   noise_level: 0.1          # flow-SDE exploration std scale (per denoise step)
+  noise_method: flow_sde    # "flow_sde" (principled reverse-SDE, matches OpenPI/GR00T)
+                            #   or "simple" (legacy ODE mean + constant-scale noise)
   freeze_video_expert: true # train only the action expert + proprio + value head
+  train_video_expert: false # set true (or freeze_video_expert: false) to also update
+                            #   the 5B video expert (value-head grad flows through the
+                            #   grad-enabled video conditioning) -- much heavier, multi-GPU
+  batched: true             # process the whole env batch in one model forward;
+                            #   auto-falls back to a per-env loop on any error
 
 fastwam:
   config_dir: null

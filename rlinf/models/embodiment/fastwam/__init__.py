@@ -223,31 +223,57 @@ def get_model(cfg: DictConfig, torch_dtype=None) -> nn.Module:
 
     # ------------------------------------------------------------------ RL head
     # When add_value_head / rl.enabled is set, attach a value head (PPO via the
-    # flow-SDE in fastwam_rl) and train only the ~1B action expert (+ proprio +
-    # value head), freezing the 5B video expert so single-GPU RL stays tractable.
+    # flow-SDE in fastwam_rl). By default only the ~1B action expert (+ proprio +
+    # value head) is trained and the 5B video expert is frozen, so single-GPU RL
+    # stays tractable. Set ``rl.train_video_expert: true`` (or ``freeze_video_expert:
+    # false``) to also update the video expert and let the value-head gradient flow
+    # through the (now grad-enabled) video conditioning — much heavier, multi-GPU.
     rl = cfg.get("rl", {}) or {}
     rl_enabled = bool(cfg.get("add_value_head", False)) or bool(rl.get("enabled", False))
+    # A value head is attached ONLY for critic-based RL (PPO/GAE, add_value_head=True).
+    # Critic-free GRPO (adv_type=grpo, loss_type=actor) sets rl.enabled but no value head:
+    # FastWAM has no good value features -- its action-inference video path runs only the
+    # *first frame* (the observation; future frames are never imagined), and the pre-DiT
+    # "tokens" are a single Conv3d of that frame's VAE latent with no task/proprio/world
+    # conditioning. Crucially, any critic must be grounded on the *observed* frame, never
+    # on imagined/generated frames -- so GRPO (env reward, no learned value) is preferred.
+    use_value_head = bool(cfg.get("add_value_head", False))
     value_head = None
     rl_cfg = None
     if rl_enabled:
-        from rlinf.models.embodiment.modules.value_head import ValueHead
+        if use_value_head:
+            from rlinf.models.embodiment.modules.value_head import ValueHead
 
-        value_dim = int(model.video_expert.hidden_dim)
-        value_head = ValueHead(input_dim=value_dim, activation="relu")
-        if bool(rl.get("freeze_video_expert", True)):
-            model.requires_grad_(False)
-            model.action_expert.requires_grad_(True)
-            if getattr(model, "proprio_encoder", None) is not None:
-                model.proprio_encoder.requires_grad_(True)
+            value_dim = int(model.video_expert.hidden_dim)
+            value_head = ValueHead(input_dim=value_dim, activation="relu")
+
+        # train_video_expert wins; freeze_video_expert: false is a legacy alias for it.
+        train_video_expert = bool(rl.get("train_video_expert", False)) or (
+            not bool(rl.get("freeze_video_expert", True))
+        )
+        # Precisely select trainable modules (overrides the SFT-time freeze_non_dit).
+        model.requires_grad_(False)
+        model.action_expert.requires_grad_(True)
+        if getattr(model, "proprio_encoder", None) is not None:
+            model.proprio_encoder.requires_grad_(True)
+        if train_video_expert:
+            model.video_expert.requires_grad_(True)
+
         rl_cfg = {
             "enabled": True,
             "noise_level": float(rl.get("noise_level", 0.1)),
-            "freeze_video_expert": bool(rl.get("freeze_video_expert", True)),
+            "noise_method": str(rl.get("noise_method", "flow_sde")),
+            "train_video_expert": train_video_expert,
+            "freeze_video_expert": not train_video_expert,
+            "batched": bool(rl.get("batched", True)),
+            "rollout_chunk": int(rl.get("rollout_chunk", 8)),
         }
         logger.info(
-            "FastWAM RL enabled: value_head(input_dim=%d), noise_level=%.3f, "
-            "freeze_video_expert=%s", value_dim, rl_cfg["noise_level"],
-            rl_cfg["freeze_video_expert"],
+            "FastWAM RL enabled: value_head=%s, noise_level=%.3f, noise_method=%s, "
+            "train_video_expert=%s, batched=%s",
+            "yes" if use_value_head else "no (critic-free, e.g. GRPO)",
+            rl_cfg["noise_level"], rl_cfg["noise_method"],
+            rl_cfg["train_video_expert"], rl_cfg["batched"],
         )
 
     policy = FastWAMPolicy(
