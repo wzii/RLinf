@@ -1,0 +1,1 @@
+- [FastWAM RLinf SFT verify](fastwam-rlinf-sft-verify.md) — experiment: verify RLinf FastWAM SFT correctness on LIBERO spatial
