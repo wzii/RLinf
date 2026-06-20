@@ -1,0 +1,85 @@
+actor:
+  fsdp_config:
+    strategy: fsdp2
+    sharding_strategy: full_shard
+    gradient_checkpointing: true
+    cpu_offload: false
+    offload_pin_memory: false
+    reshard_after_forward: true
+    enable_gradient_accumulation: true
+    forward_prefetch: true
+    limit_all_gathers: false
+    backward_prefetch: pre
+    use_orig_params: true
+    use_liger_kernel: false
+    mixed_precision:
+      param_dtype: bf16
+      reduce_dtype: bf16
+      buffer_dtype: bf16
+    amp_autocast:
+      enabled: false
+      precision: bf16
+    grad_scaler:
+      enabled: false
+      init_scale: null
+      growth_interval: null
+    wrap_policy:
+      no_split_names:
+      - __none__
+    gradient_checkpointing_use_reentrant: true
+    save_full_model_weights: true
+  model:
+    model_type: fastwam
+    precision: bf16
+    is_lora: false
+    model_path: null
+    checkpoint_path: /workspace/checkpoints/fastwam/libero_uncond_2cam224.pt
+    dataset_stats_path: /workspace/checkpoints/fastwam/libero_uncond_2cam224_dataset_stats.json
+    freeze_non_dit: true
+    fastwam:
+      config_dir: null
+      config_name: sim_libero
+      overrides:
+      - model.load_text_encoder=false
+      - model.mot_checkpoint_mixed_attn=true
+      - model.redirect_common_files=false
+  group_name: ActorGroup
+  training_backend: fsdp
+  micro_batch_size: 4
+  global_batch_size: 16
+  seed: 42
+  optim:
+    lr: 1.0e-05
+    adam_beta1: 0.9
+    adam_beta2: 0.95
+    adam_eps: 1.0e-08
+    weight_decay: 0.01
+    clip_grad: 1.0
+    lr_scheduler: cosine
+    lr_warmup_steps: -1
+    lr_warmup_steps_ratio: 0.05
+    total_training_steps: 1000
+cluster:
+  num_nodes: 1
+  component_placement:
+    actor: all
+runner:
+  task_type: sft
+  logger:
+    log_path: /workspace/results/sft_1k
+    project_name: rlinf
+    experiment_name: libero_sft_fastwam_1k
+    logger_backends:
+    - tensorboard
+  max_epochs: -1
+  max_steps: 1000
+  val_check_interval: -1
+  save_interval: 1000
+  log_interval: 1
+  resume_dir: null
+  per_worker_log: false
+  per_worker_log_path: null
+data:
+  train_data_paths: /workspace/data/libero/libero_spatial_no_noops_lerobot
+  text_embedding_cache_dir: /workspace/data/text_embeds_cache/libero
+  num_workers: 2
