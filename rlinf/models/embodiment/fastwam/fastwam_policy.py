@@ -527,6 +527,18 @@ class FastWAMPolicy(nn.Module, BasePolicy):
                 values.append(val)
 
         out = {"logprobs": torch.cat(logps, dim=0)}
+        # Importance-ratio fix: expose the actor's OWN recomputed log-prob (detached) as the
+        # "old" log-prob, instead of the rollout worker's. The rollout and actor are separate
+        # processes whose bf16 forwards disagree at ~bf16 precision (~8e-3); because the
+        # flow-SDE log-prob is a 70-element (chunks x dims) sum evaluated at the SAMPLED action
+        # (near the rollout mean = the Gaussian tail), that tiny disagreement explodes the PPO
+        # ratio (exp of the summed diff) to ~0.25-1.0 even before any update, biasing the
+        # gradient and degrading the policy. The actor's recompute is bit-identical to its own
+        # forward (verified single-process: ratio==1.0000), so old==new at the first update ->
+        # ratio==1. Correct for update_epoch==1 (our GRPO): ratio==1 gives the exact
+        # advantage-weighted group-relative policy gradient. (For update_epoch>1 the old
+        # log-prob should instead be recomputed once before the inner update loop.)
+        out["prev_logprobs"] = out["logprobs"].detach()
         # values omitted for critic-free GRPO (values entries are None).
         if want_values:
             out["values"] = torch.cat(values, dim=0)

@@ -1425,6 +1425,12 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
             SupportedModel.ABOT_M0,
         ]:
             prev_logprobs = output_dict["prev_logprobs"]
+        elif SupportedModel(self.cfg.actor.model.model_type) == SupportedModel.FASTWAM:
+            # Use the actor's own (in-process, bit-exact) recompute as the "old" log-prob
+            # so the PPO/GRPO ratio is 1 at the first update, instead of the rollout
+            # worker's cross-process bf16 log-prob (which the flow-SDE tail-sum amplifies
+            # into a spurious 0.25-1.0 ratio). See FastWAMPolicy.default_forward.
+            prev_logprobs = output_dict["prev_logprobs"]
 
         loss_kwargs = {
             "loss_type": self.cfg.algorithm.loss_type,
