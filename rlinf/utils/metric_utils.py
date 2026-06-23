@@ -100,6 +100,28 @@ def compute_evaluate_metrics(eval_metrics_list):
         if metric:
             all_eval_metrics[env_info_key] = metric
 
+    # per-task success_once breakdown (extra keys; does not alter the aggregate)
+    per_task = {}
+    if "task_id" in all_eval_metrics and "success_once" in all_eval_metrics:
+        try:
+            tid = torch.concat(
+                [_normalize_metric_shard(s) for s in all_eval_metrics["task_id"]]
+            ).long()
+            so = torch.concat(
+                [_normalize_metric_shard(s) for s in all_eval_metrics["success_once"]]
+            ).float()
+            if tid.numel() == so.numel() and tid.numel() > 0:
+                for t in torch.unique(tid).tolist():
+                    m = tid == t
+                    per_task[f"success_once_task{int(t)}"] = (
+                        so[m].mean().detach().cpu().numpy()
+                    )
+                    per_task[f"n_task{int(t)}"] = np.asarray(float(m.sum().item()))
+        except Exception:
+            per_task = {}
+    # drop raw task_id so it is not meaned into a meaningless scalar
+    all_eval_metrics.pop("task_id", None)
+
     for key in all_eval_metrics:
         shards = [_normalize_metric_shard(s) for s in all_eval_metrics[key]]
         stacked = torch.concat(shards).float()
@@ -109,6 +131,7 @@ def compute_evaluate_metrics(eval_metrics_list):
             else np.asarray(0.0, dtype=np.float64)
         )
 
+    all_eval_metrics.update(per_task)
     # Add total trajectory count to metrics
     all_eval_metrics["num_trajectories"] = sum(trajectory_counts)
 

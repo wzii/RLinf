@@ -1,0 +1,66 @@
+defaults:
+  - env/libero_spatial@env.eval
+  - model/fastwam@rollout.model
+  - override hydra/job_logging: stdout
+
+# Official-protocol-aligned eval of the RELEASED FastWAM ckpt.
+# Identical to libero_spatial_fastwam_eval.yaml EXCEPT max_episode_steps 240 -> 400,
+# matching FastWAM/configs/sim_libero.yaml::_get_max_steps(libero_spatial)=400.
+# All other knobs already match official: num_action_chunks=10 (==replan_steps),
+# num_inference_steps=10, use_action_ensembler=false (off both sides), 50 trials/task.
+# Purpose: test whether the 90.4 -> 98.2 gap is purely the episode-length cap.
+
+hydra:
+  run:
+    dir: .
+  output_subdir: null
+  searchpath:
+    - file://${oc.env:EMBODIED_PATH}/config/
+
+cluster:
+  num_nodes: 1
+  component_placement:
+    env,rollout: all
+
+runner:
+  task_type: embodied_eval
+  logger:
+    log_path: "../results"
+    project_name: rlinf
+    experiment_name: "libero_spatial_eval_fastwam_official400"
+    logger_backends: ["tensorboard"]
+
+  max_epochs: 1
+  only_eval: True
+  val_check_interval: -1
+  save_interval: -1
+  resume_dir: null
+  ckpt_path: null
+
+env:
+  group_name: "EnvGroup"
+
+  eval:
+    rollout_epoch: 5
+    total_num_envs: 20                # 20 envs x 5 epochs = 100 episodes (10 tasks x 10 trials)
+    auto_reset: True
+    ignore_terminations: True
+    max_episode_steps: 400            # <-- the only change vs the 240-step harness
+    max_steps_per_rollout_epoch: 400  # one trajectory per env per epoch
+    group_size: 1
+    use_fixed_reset_state_ids: True
+    use_ordered_reset_state_ids: True
+    is_eval: True
+
+    video_cfg:
+      save_video: False
+      video_base_dir: ${runner.logger.log_path}/video/eval
+
+rollout:
+  group_name: "RolloutGroup"
+  generation_backend: "huggingface"
+  enable_offload: False
+  pipeline_stage_num: 1
+
+  model:
+    model_type: "fastwam"

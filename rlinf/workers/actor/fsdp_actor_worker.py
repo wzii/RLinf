@@ -1166,6 +1166,17 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
                 mean_reward_in_group <= self.cfg.algorithm.rewards_upper_bound
             )  # [n_prompts]
 
+            # safety: if EVERY group is out of [lower, upper] (e.g. all rollouts
+            # failed or all succeeded under heavy exploration), applying the filter
+            # would zero out loss_mask entirely -> token-mean loss divides by
+            # sum(mask)=0 -> NaN and the run dies. Skip the filter this step instead.
+            if not bool(reward_filter_mask.any()):
+                self.log_warning(
+                    "filter_rewards: all groups out of [lower, upper] bounds; "
+                    "skipping reward filter this step to avoid empty batch / NaN loss."
+                )
+                return rollout_batch
+
             # extend mask dimension
             reward_filter_mask = reward_filter_mask.repeat_interleave(
                 group_size

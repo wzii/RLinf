@@ -1519,6 +1519,11 @@ install_libero_env() {
     libero_dir=$(clone_or_reuse_repo LIBERO_PATH "$VENV_DIR/libero" https://github.com/RLinf/LIBERO.git)
 
     uv pip install -e "$libero_dir"
+    # Pin mujoco to 3.3.2: LIBERO's benchmark assets and demo data are recorded with
+    # mujoco 3.3.2. robosuite only requires mujoco>=2.3.0, so a fresh install pulls the
+    # latest (e.g. 3.9.x), whose contact/solver physics differ enough to drop LIBERO
+    # success rates by ~5-8 points vs the data version (FastWAM README pins this too).
+    uv pip install mujoco==3.3.2
     echo "export PYTHONPATH=$(realpath "$libero_dir"):\$PYTHONPATH" >> "$VENV_DIR/bin/activate"
 }
 

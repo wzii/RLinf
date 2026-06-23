@@ -571,6 +571,8 @@ class LiberoEnv(gym.Env):
         episode_info["reward"] = episode_info["return"] / np.maximum(
             episode_len_for_reward, 1
         )
+        # per-env task id so eval metrics can be broken down per task
+        episode_info["task_id"] = np.asarray(self.task_ids).copy()
         infos["episode"] = to_tensor(episode_info)
         return infos
 
