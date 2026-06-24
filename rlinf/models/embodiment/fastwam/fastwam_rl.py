@@ -76,7 +76,15 @@ from typing import Any, Optional
 import torch
 
 _LOG_STD_FLOOR = 1e-4  # avoid log(0) / divide-by-zero in the last (tiny) step
-_T_EPS = 1e-4  # keep t away from {0, 1} in sigma = noise_level * sqrt(t/(1-t))
+_T_EPS = 1e-4  # keep t away from 0 in sigma = noise_level * sqrt(t/(1-t))
+# Cap t near 1 for the sigma term. The first denoise step has t == t_model/num_train
+# == 1.0 (Wan2.2 shift=5 schedule starts at the noise endpoint), and with _T_EPS=1e-4
+# this gave 1-t_c=1e-4 -> sigma = noise*sqrt(0.9999/1e-4) = noise*100, i.e. an action
+# noise std ~2.2 at noise_level=0.15 (action range is [-1,1]) -> the very first step
+# randomizes the action and the whole rollout collapses. dexbotic avoids this by using
+# timesteps[1] in the denominator at t==1 (1-0.978=0.022). We clamp t to 0.98 so the
+# first step's sigma stays in the same ~O(1) range as the rest of the chain.
+_SIGMA_T_MAX = 0.98
 
 
 def gaussian_logprob(sample: torch.Tensor, mean: torch.Tensor, std: torch.Tensor) -> torch.Tensor:
@@ -146,7 +154,7 @@ def flow_step_mean_std(
 
     # Principled reverse-SDE (mirrors OpenPI / GR00T flow_sde).
     noise_pred = xf + (1.0 - t) * vf  # x1 (predicted noise)
-    t_c = t.clamp(_T_EPS, 1.0 - _T_EPS)
+    t_c = t.clamp(_T_EPS, _SIGMA_T_MAX)
     sigma = noise_level * torch.sqrt(t_c / (1.0 - t_c))
     mean = mean_ode - noise_pred * (sigma**2 * abs_delta / (2.0 * t_c))
     std = (torch.sqrt(abs_delta) * sigma).expand_as(mean)
