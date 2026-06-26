@@ -365,8 +365,12 @@ def flow_sde_rollout(
     # Picked up front so single-step SDE can inject noise only at that step (OpenPI-style).
     denoise_inds = torch.randint(0, num_inference_steps, (batch,), device=model.device)
 
-    chains = [x]
-    logps = []
+    # Eval (deterministic) discards the chain/logprob tensors downstream (the rollout
+    # worker drops the result dict on the eval path), so skip building them entirely --
+    # at high eval env counts the [B, num_steps+1, H, D] chain stack is a real memory hog.
+    collect = not deterministic
+    chains = [x] if collect else None
+    logps = [] if collect else None
     for k in range(num_inference_steps):
         mean, std, mean_ode = _step_mean_std(
             model, x, timesteps[k], timesteps[k] / nt, deltas[k], context, context_mask,
@@ -375,7 +379,6 @@ def flow_sde_rollout(
         if deterministic:
             # eval: pure flow-matching ODE (no sigma correction); matches OpenPI's eval path.
             x = mean_ode
-            logp = torch.zeros_like(mean)
         elif sde_sampling == "single":
             # OpenPI-style: only the chosen step is stochastic; others are ODE steps.
             is_sde = (denoise_inds == k).view(batch, *([1] * (mean.dim() - 1)))
@@ -392,9 +395,13 @@ def flow_sde_rollout(
             raise ValueError(
                 f"Unknown sde_sampling={sde_sampling!r}; expected 'single' or 'full'."
             )
-        chains.append(x)
-        logps.append(logp)
+        if collect:
+            chains.append(x)
+            logps.append(logp)
 
+    if not collect:
+        # Eval: nothing downstream reads info (rollout worker discards the result).
+        return x, {}
     chains_t = torch.stack(chains, dim=1)  # [B, num_steps+1, H, D]
     logp_t = torch.stack(logps, dim=1)  # [B, num_steps, H, D]
     info = {

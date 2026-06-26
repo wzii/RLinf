@@ -310,7 +310,14 @@ class FastWAMPolicy(nn.Module, BasePolicy):
 
     def _rl_rollout_from_conds(self, conds, deterministic):
         """Run flow-SDE rollout over a list of (image, context, mask) groups and assemble
-        the RLinf rollout result. Each group may carry any batch size (1 for per-env)."""
+        the RLinf rollout result. Each group may carry any batch size (1 for per-env).
+
+        Eval (``deterministic=True``) skips every training-replay tensor. The rollout
+        worker discards the result dict on the eval path (``mode="eval" -> actions, _``),
+        so collecting per-step log-probs/values and cat-ing chains/image/context across
+        all envs is pure waste -- and at high eval env counts that cat is what OOMs.
+        On the eval path we return ``actions`` plus an empty result.
+        """
         cfg = self.infer_cfg
         nchunks = cfg.num_action_chunks
         chunks, logps, values = [], [], []
@@ -326,21 +333,26 @@ class FastWAMPolicy(nn.Module, BasePolicy):
                 sde_sampling=self._rl_sde_sampling,
             )
             b = int(image.shape[0])
-            di = info["denoise_inds"].to(torch.long)  # [b]
-            ar = torch.arange(b, device=di.device)
-            # Each trajectory's log-prob at its own sampled denoise step.
-            logps.append(info["logp_per_step"][ar, di][:, :nchunks, :].float())
-            if self.has_value_head:
-                values.append(self._value(info["pooled_video_feat"]))
-            f_chains.append(info["chains"])
-            f_di.append(di)
-            f_img.append(image)
-            f_ctx.append(context)
-            f_mask.append(context_mask)
+            if not deterministic:
+                # Training only: gather the PPO/GRPO replay tensors.
+                di = info["denoise_inds"].to(torch.long)  # [b]
+                ar = torch.arange(b, device=di.device)
+                # Each trajectory's log-prob at its own sampled denoise step.
+                logps.append(info["logp_per_step"][ar, di][:, :nchunks, :].float())
+                if self.has_value_head:
+                    values.append(self._value(info["pooled_video_feat"]))
+                f_chains.append(info["chains"])
+                f_di.append(di)
+                f_img.append(image)
+                f_ctx.append(context)
+                f_mask.append(context_mask)
             for j in range(b):
                 chunks.append(self._postprocess_action(action_lat[j : j + 1]))
 
         actions = np.stack(chunks, axis=0).astype(np.float32)
+        if deterministic:
+            # Eval: the rollout worker discards the result -- skip the replay tensors.
+            return actions, {}
         result = {
             "prev_logprobs": torch.cat(logps, dim=0),
             # None for critic-free GRPO; the rollout worker tolerates a None value.
