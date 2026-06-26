@@ -1171,8 +1171,15 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
             # would zero out loss_mask entirely -> token-mean loss divides by
             # sum(mask)=0 -> NaN and the run dies. Skip the filter this step instead.
             if not bool(reward_filter_mask.any()):
+                _means = [round(float(m), 3) for m in mean_reward_in_group.tolist()]
+                _lo = self.cfg.algorithm.rewards_lower_bound
+                _hi = self.cfg.algorithm.rewards_upper_bound
                 self.log_warning(
-                    "filter_rewards: all groups out of [lower, upper] bounds; "
+                    f"filter_rewards: ALL {len(_means)} groups out of [lower={_lo}, upper={_hi}] bounds; "
+                    f"per-group mean reward = {_means} "
+                    f"(min={min(_means):.3f}, max={max(_means):.3f}, "
+                    f"#below_lower={sum(1 for m in _means if m < _lo)}, "
+                    f"#above_upper={sum(1 for m in _means if m > _hi)}); "
                     "skipping reward filter this step to avoid empty batch / NaN loss."
                 )
                 return rollout_batch
@@ -1436,12 +1443,10 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
             SupportedModel.ABOT_M0,
         ]:
             prev_logprobs = output_dict["prev_logprobs"]
-        elif SupportedModel(self.cfg.actor.model.model_type) == SupportedModel.FASTWAM:
-            # Use the actor's own (in-process, bit-exact) recompute as the "old" log-prob
-            # so the PPO/GRPO ratio is 1 at the first update, instead of the rollout
-            # worker's cross-process bf16 log-prob (which the flow-SDE tail-sum amplifies
-            # into a spurious 0.25-1.0 ratio). See FastWAMPolicy.default_forward.
-            prev_logprobs = output_dict["prev_logprobs"]
+        # FASTWAM: keep the rollout's behavior logprob (micro_batch["prev_logprobs"]) as the
+        # GRPO "old" log-prob — the standard importance-ratio denominator, same as openpi/gr00t.
+        # (Previously overrode it with the actor's own detach -> ratio==1, which replaced the
+        # behavior policy in the denominator and is not a true importance ratio.)
 
         loss_kwargs = {
             "loss_type": self.cfg.algorithm.loss_type,

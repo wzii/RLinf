@@ -50,6 +50,7 @@ algorithm:
   entropy_type: chunk_level
 
   update_epoch: 1
+  recompute_logprobs: False  # standard GRPO: old = rollout's behavior logprob (like openpi/gr00t), not actor's own detach
   adv_type: grpo            # critic-free
   loss_type: actor         # no value loss
   loss_agg_func: "token-mean"
@@ -63,8 +64,8 @@ algorithm:
   gae_lambda: 0.95
 
   filter_rewards: True
-  rewards_lower_bound: 0.1
-  rewards_upper_bound: 0.9
+  rewards_lower_bound: 0.05
+  rewards_upper_bound: 0.95
 
 env:
   group_name: "EnvGroup"
@@ -98,6 +99,7 @@ env:
 rollout:
   group_name: "RolloutGroup"
   backend: "huggingface"
+  return_logprobs: True       # emit the behavior-policy logprob from rollout as GRPO "old"
   enable_offload: True
   pipeline_stage_num: 1
 

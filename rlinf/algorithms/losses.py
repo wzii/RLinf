@@ -296,6 +296,10 @@ def compute_ppo_actor_loss(
         "actor/policy_loss": policy_loss.detach(),
         "actor/policy_loss_abs": metric_policy_loss_abs.detach(),
         "actor/ratio": masked_mean(ratio_for_metrics, loss_mask_for_metrics),
+        "actor/ratio_std": masked_mean(
+            (ratio_for_metrics - masked_mean(ratio_for_metrics, loss_mask_for_metrics)) ** 2,
+            loss_mask_for_metrics,
+        ).clamp_min(0.0).sqrt(),
         "actor/ratio_abs": masked_mean(ratio_abs_for_metrics, loss_mask_for_metrics),
         "actor/clipped_ratio": masked_mean(
             clipped_ratio_for_metrics, loss_mask_for_metrics

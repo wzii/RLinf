@@ -117,8 +117,11 @@ def flow_step_mean_std(
     delta: torch.Tensor,
     noise_level: float,
     noise_method: str = "flow_sde",
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Per-step flow-SDE Gaussian ``(mean, std)`` for a velocity ``v`` at noise-time ``t``.
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Per-step flow-SDE Gaussian ``(mean, std, mean_ode)`` for a velocity ``v`` at noise-time ``t``.
+
+    ``mean_ode`` is the deterministic Euler step (== scheduler.step, no sigma correction);
+    callers use it for ODE-only denoise steps (OpenPI-style single-step SDE, or eval).
 
     Args:
         x: current latent ``[B, H, D]``.
@@ -145,7 +148,7 @@ def flow_step_mean_std(
     if noise_method == "simple":
         mean = mean_ode
         std = (noise_level * torch.sqrt(abs_delta + 1e-12)).expand_as(mean)
-        return mean, std
+        return mean, std, mean_ode
 
     if noise_method != "flow_sde":
         raise ValueError(
@@ -158,7 +161,7 @@ def flow_step_mean_std(
     sigma = noise_level * torch.sqrt(t_c / (1.0 - t_c))
     mean = mean_ode - noise_pred * (sigma**2 * abs_delta / (2.0 * t_c))
     std = (torch.sqrt(abs_delta) * sigma).expand_as(mean)
-    return mean, std
+    return mean, std, mean_ode
 
 
 @contextlib.contextmanager
@@ -329,8 +332,16 @@ def flow_sde_rollout(
     noise_level: float,
     noise_method: str = "flow_sde",
     deterministic: bool = False,
+    sde_sampling: str = "single",
 ):
     """Sample an action chunk via the flow-SDE, recording the denoise chain. Batched.
+
+    ``sde_sampling`` controls where exploration noise is injected during training rollout:
+      * ``"single"`` (default, OpenPI-aligned) — only the per-trajectory ``denoise_inds``
+        step is stochastic (mean + std*noise); every other step is a deterministic ODE
+        step (``mean_ode``). Lower variance, matches OpenPI/flow-GRPO single-step PG.
+      * ``"full"`` (legacy) — every denoise step injects noise (full-chain SDE).
+    ``deterministic=True`` (eval) ignores this and runs the pure ODE at every step.
 
     Returns ``(final_action[B,H,D], info)`` where ``info`` has ``chains``
     ``[B, num_steps+1, H, D]``, ``logp_per_step`` ``[B, num_steps, H, D]``,
@@ -350,26 +361,42 @@ def flow_sde_rollout(
     # Work in fp32 (chains / logprobs); the model forward casts back to its dtype.
     x = torch.randn((batch, action_horizon, action_dim), device=model.device, dtype=torch.float32)
 
+    # One sampled denoise index per trajectory whose log-prob enters the PPO ratio.
+    # Picked up front so single-step SDE can inject noise only at that step (OpenPI-style).
+    denoise_inds = torch.randint(0, num_inference_steps, (batch,), device=model.device)
+
     chains = [x]
     logps = []
     for k in range(num_inference_steps):
-        mean, std = _step_mean_std(
+        mean, std, mean_ode = _step_mean_std(
             model, x, timesteps[k], timesteps[k] / nt, deltas[k], context, context_mask,
             video_kv_cache, attention_mask, video_seq_len, noise_level, noise_method,
         )
         if deterministic:
-            x = mean
+            # eval: pure flow-matching ODE (no sigma correction); matches OpenPI's eval path.
+            x = mean_ode
             logp = torch.zeros_like(mean)
-        else:
+        elif sde_sampling == "single":
+            # OpenPI-style: only the chosen step is stochastic; others are ODE steps.
+            is_sde = (denoise_inds == k).view(batch, *([1] * (mean.dim() - 1)))
+            x_sde = mean + std * torch.randn_like(mean)
+            x = torch.where(is_sde, x_sde, mean_ode)
+            logp = torch.where(
+                is_sde, gaussian_logprob(x_sde, mean, std), torch.zeros_like(mean)
+            )
+        elif sde_sampling == "full":
+            # Legacy full-chain SDE: every denoise step injects noise.
             x = mean + std * torch.randn_like(mean)
             logp = gaussian_logprob(x, mean, std)
+        else:
+            raise ValueError(
+                f"Unknown sde_sampling={sde_sampling!r}; expected 'single' or 'full'."
+            )
         chains.append(x)
         logps.append(logp)
 
     chains_t = torch.stack(chains, dim=1)  # [B, num_steps+1, H, D]
     logp_t = torch.stack(logps, dim=1)  # [B, num_steps, H, D]
-    # One sampled denoise index per trajectory whose log-prob enters the PPO ratio.
-    denoise_inds = torch.randint(0, num_inference_steps, (batch,), device=model.device)
     info = {
         "chains": chains_t,
         "logp_per_step": logp_t,
@@ -430,7 +457,7 @@ def recompute_logprob(
     # checkpoint skip param-grad computation.
     x_pre = x_pre.detach().requires_grad_(True)
     nt = float(getattr(model.infer_action_scheduler, "num_train_timesteps", 1000))
-    mean, std = _step_mean_std(
+    mean, std, _ = _step_mean_std(
         model, x_pre, t, t / nt, delta, context, context_mask,
         video_kv_cache, attention_mask, video_seq_len, noise_level, noise_method,
     )

@@ -114,6 +114,11 @@ class FastWAMPolicy(nn.Module, BasePolicy):
         # "flow_sde" = principled reverse-SDE (default, matches OpenPI/GR00T);
         # "simple" = legacy ODE-mean + constant-scale noise. See fastwam_rl.
         self._rl_noise_method = str(self.rl_cfg.get("noise_method", "flow_sde"))
+        # Where to inject SDE noise during training rollout (see flow_sde_rollout):
+        # "single" (default, OpenPI-aligned) = one stochastic denoise step per rollout,
+        # rest are ODE steps; "full" = every step stochastic (legacy full-chain SDE).
+        # Eval always runs the pure ODE regardless of this flag.
+        self._rl_sde_sampling = str(self.rl_cfg.get("sde_sampling", "single"))
         # Train the (otherwise frozen) video expert through the rebuilt conditioning.
         self._rl_train_video_expert = bool(self.rl_cfg.get("train_video_expert", False))
         # Process the whole env batch in one model forward when True; fall back to the
@@ -318,6 +323,7 @@ class FastWAMPolicy(nn.Module, BasePolicy):
                 noise_level=self._rl_noise_level,
                 noise_method=self._rl_noise_method,
                 deterministic=deterministic,
+                sde_sampling=self._rl_sde_sampling,
             )
             b = int(image.shape[0])
             di = info["denoise_inds"].to(torch.long)  # [b]
