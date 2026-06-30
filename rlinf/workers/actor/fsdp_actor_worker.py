@@ -151,7 +151,9 @@ class FSDPActor(FSDPModelManager, Worker):
             cfg.algorithm.entropy_bonus > 0 and self.calculate_entropy
         )
         self.kl_beta = cfg.algorithm.kl_beta
-        self.kl_penalty_type = cfg.algorithm.kl_penalty_type
+        self.kl_penalty_type = cfg.algorithm.get(
+            "kl_penalty_type", cfg.algorithm.get("kl_penalty", "kl")
+        )
         self.reinpp_kl_beta = cfg.algorithm.get("reinpp_kl_beta", 0.0)
         self.combine_reference_model = cfg.actor.get("combine_reference_model", True)
 
@@ -773,7 +775,7 @@ class FSDPActor(FSDPModelManager, Worker):
 
             kl_loss = torch.tensor(0.0, device=Worker.torch_platform.current_device())
             if self.kl_beta > 0 and ref_logprobs is not None:
-                kld = kl_penalty(ref_logprobs, logprobs, self.kl_penalty_type)
+                kld = kl_penalty(logprobs, ref_logprobs, self.kl_penalty_type)
                 kl_loss = self.loss_agg_func(kld, loss_mask)
                 loss = loss + kl_loss * self.kl_beta
 
@@ -980,6 +982,17 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
         self.enable_offload = self.cfg.actor.get("enable_offload", False)
         self.entropy_op_type = self.cfg.algorithm.get("entropy_op_type", "torch")
 
+        # KL reference-policy support (mirrors FSDPActor; required by the KL block in
+        # train_micro_batch — EmbodiedFSDPActor is a separate class and previously lacked these).
+        self.kl_beta = cfg.algorithm.kl_beta
+        self.kl_penalty_type = cfg.algorithm.get(
+            "kl_penalty_type", cfg.algorithm.get("kl_penalty", "kl")
+        )
+        self.reinpp_kl_beta = cfg.algorithm.get("reinpp_kl_beta", 0.0)
+        self.combine_reference_model = cfg.actor.get("combine_reference_model", True)
+        self.ref_policy_state_dict = None
+        self.offload_model_buffer = {}
+
         self.enable_sft_co_train = cfg.actor.get("enable_sft_co_train", False)
         self.version = 0
         if self.enable_sft_co_train:
@@ -1016,6 +1029,12 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
         if needed, offload model parameters and optimizer states to CPU.
         """
         self.setup_model_and_optimizer()
+
+        if (
+            self.kl_beta > 0 or self.reinpp_kl_beta > 0
+        ) and self.combine_reference_model:
+            self.ref_policy_state_dict = retrieve_model_state_dict_in_cpu(self.model)
+            self.offload_model_buffer = {}
 
         if self.enable_offload:
             self.offload_param_and_grad()
@@ -1219,6 +1238,7 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
             "reward_type": self.cfg.algorithm.reward_type,
             "loss_mask": self.rollout_batch.get("loss_mask", None),
             "loss_mask_sum": self.rollout_batch.get("loss_mask_sum", None),
+            "grpo_norm_by_std": self.cfg.algorithm.get("grpo_norm_by_std", True),
         }
 
         advantages_and_returns = calculate_adv_and_returns(**kwargs)
@@ -1230,6 +1250,26 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
             self.rollout_batch.update({"loss_mask_sum": kwargs["loss_mask_sum"]})
 
         rollout_metrics = compute_rollout_metrics(self.rollout_batch)
+
+        # Opt-in per-rollout debugging report (default off). Wrapped so a shape mismatch
+        # in the report builder can never disrupt training.
+        if self.cfg.runner.get("per_rollout_report", False):
+            try:
+                from rlinf.utils.per_rollout_report import write_per_rollout_report
+
+                write_per_rollout_report(
+                    rollout_batch=self.rollout_batch,
+                    group_size=int(self.cfg.algorithm.get("group_size", 8)),
+                    global_step=int(getattr(self, "version", -1)),
+                    out_dir=str(self.cfg.runner.logger.log_path),
+                    task_ids=self.rollout_batch.get("task_ids", None),
+                )
+            except Exception as _e:  # noqa: BLE001 - never break training on report errors
+                try:
+                    self.log_warning(f"[per_rollout_report] skipped: {_e!r}")
+                except Exception:
+                    pass
+
         return rollout_metrics
 
     def _build_sft_data_loader(self):
@@ -1497,6 +1537,43 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
             entropy_loss = masked_mean(entropy, mask=loss_mask)
             loss -= self.cfg.algorithm.entropy_bonus * entropy_loss
         metrics_data["actor/entropy_loss"] = entropy_loss.detach().item()
+
+        kl_loss = torch.tensor(0.0, device=Worker.torch_platform.current_device())
+        if self.kl_beta > 0:
+            assert self.ref_policy_state_dict is not None, (
+                "Reference policy state dict is None but algorithm.kl_beta > 0. "
+                "Set actor.combine_reference_model=true or disable kl_beta."
+            )
+            with torch.no_grad():
+                with cpu_weight_swap(
+                    self.model,
+                    self.ref_policy_state_dict,
+                    self.offload_model_buffer,
+                ):
+                    with self.amp_context:
+                        ref_output_dict = self.model(
+                            forward_inputs=forward_inputs,
+                            compute_logprobs=True,
+                            compute_entropy=False,
+                            compute_values=False,
+                            use_cache=False,
+                            **kwargs,
+                        )
+            kld = kl_penalty(
+                output_dict["logprobs"],
+                ref_output_dict["logprobs"],
+                self.kl_penalty_type,
+            )
+            # FASTWAM: kld follows the raw (B, action-chunk) logprob shape, which does
+            # not match loss_mask's token shape (policy_loss reshapes internally before
+            # masking). The KL term only needs a scalar regularizer, so average kld
+            # directly instead of masked_mean to avoid the shape mismatch.
+            if kld.shape == loss_mask.shape:
+                kl_loss = masked_mean(kld, mask=loss_mask)
+            else:
+                kl_loss = kld.mean()
+            loss = loss + kl_loss * self.kl_beta
+        metrics_data["actor/kl_loss"] = kl_loss.detach().item()
 
         if self.enable_sft_co_train:
             self._train_sft_epoch(metrics_data, loss)

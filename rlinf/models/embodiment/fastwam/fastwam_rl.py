@@ -361,9 +361,13 @@ def flow_sde_rollout(
     # Work in fp32 (chains / logprobs); the model forward casts back to its dtype.
     x = torch.randn((batch, action_horizon, action_dim), device=model.device, dtype=torch.float32)
 
-    # One sampled denoise index per trajectory whose log-prob enters the PPO ratio.
-    # Picked up front so single-step SDE can inject noise only at that step (OpenPI-style).
-    denoise_inds = torch.randint(0, num_inference_steps, (batch,), device=model.device)
+    # One sampled denoise index, SHARED across the whole batch (OpenPI-aligned: OpenPI
+    # draws a single random.randint and broadcasts it over bsize). All trajectories inject
+    # SDE noise at the same denoise step; intra-group (GRPO) diversity then comes purely
+    # from the per-trajectory injected noise value, not from differing injection steps.
+    denoise_inds = torch.randint(
+        0, num_inference_steps, (1,), device=model.device
+    ).expand(batch).contiguous()
 
     # Eval (deterministic) discards the chain/logprob tensors downstream (the rollout
     # worker drops the result dict on the eval path), so skip building them entirely --
@@ -371,6 +375,9 @@ def flow_sde_rollout(
     collect = not deterministic
     chains = [x] if collect else None
     logps = [] if collect else None
+    # Debug instrumentation: L2 norm of the injected exploration noise at each
+    # trajectory's chosen denoise step (filled in the single-step branch below).
+    inj_noise_norm = torch.zeros(batch, device=model.device) if collect else None
     for k in range(num_inference_steps):
         mean, std, mean_ode = _step_mean_std(
             model, x, timesteps[k], timesteps[k] / nt, deltas[k], context, context_mask,
@@ -382,8 +389,15 @@ def flow_sde_rollout(
         elif sde_sampling == "single":
             # OpenPI-style: only the chosen step is stochastic; others are ODE steps.
             is_sde = (denoise_inds == k).view(batch, *([1] * (mean.dim() - 1)))
-            x_sde = mean + std * torch.randn_like(mean)
+            injected = std * torch.randn_like(mean)  # the exploration noise at this step
+            x_sde = mean + injected
             x = torch.where(is_sde, x_sde, mean_ode)
+            if collect:
+                # record ||injected||_2 per trajectory, but only at its chosen step
+                chosen = denoise_inds == k  # [B]
+                inj_noise_norm = torch.where(
+                    chosen, injected.flatten(1).norm(dim=1), inj_noise_norm
+                )
             logp = torch.where(
                 is_sde, gaussian_logprob(x_sde, mean, std), torch.zeros_like(mean)
             )
@@ -408,6 +422,7 @@ def flow_sde_rollout(
         "chains": chains_t,
         "logp_per_step": logp_t,
         "denoise_inds": denoise_inds,
+        "inject_noise_norm": inj_noise_norm,  # [B] L2 norm of injected noise (debug report)
         "pooled_video_feat": pooled,
     }
     return x, info

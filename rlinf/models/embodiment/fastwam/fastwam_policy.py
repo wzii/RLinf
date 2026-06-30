@@ -322,6 +322,7 @@ class FastWAMPolicy(nn.Module, BasePolicy):
         nchunks = cfg.num_action_chunks
         chunks, logps, values = [], [], []
         f_chains, f_di, f_img, f_ctx, f_mask = [], [], [], [], []
+        f_nn = []  # per-step injected-noise L2 norm (debug report)
         for image, context, context_mask in conds:
             action_lat, info = R.flow_sde_rollout(
                 self.model, image, context, context_mask,
@@ -343,6 +344,7 @@ class FastWAMPolicy(nn.Module, BasePolicy):
                     values.append(self._value(info["pooled_video_feat"]))
                 f_chains.append(info["chains"])
                 f_di.append(di)
+                f_nn.append(info["inject_noise_norm"].float())  # [b]
                 f_img.append(image)
                 f_ctx.append(context)
                 f_mask.append(context_mask)
@@ -360,6 +362,7 @@ class FastWAMPolicy(nn.Module, BasePolicy):
             "forward_inputs": {
                 "chains": torch.cat(f_chains, dim=0),
                 "denoise_inds": torch.cat(f_di, dim=0),
+                "inject_noise_norm": torch.cat(f_nn, dim=0),  # [B] (debug report)
                 "image": torch.cat(f_img, dim=0),
                 "context": torch.cat(f_ctx, dim=0),
                 "context_mask": torch.cat(f_mask, dim=0),
@@ -545,18 +548,9 @@ class FastWAMPolicy(nn.Module, BasePolicy):
                 values.append(val)
 
         out = {"logprobs": torch.cat(logps, dim=0)}
-        # Importance-ratio fix: expose the actor's OWN recomputed log-prob (detached) as the
-        # "old" log-prob, instead of the rollout worker's. The rollout and actor are separate
-        # processes whose bf16 forwards disagree at ~bf16 precision (~8e-3); because the
-        # flow-SDE log-prob is a 70-element (chunks x dims) sum evaluated at the SAMPLED action
-        # (near the rollout mean = the Gaussian tail), that tiny disagreement explodes the PPO
-        # ratio (exp of the summed diff) to ~0.25-1.0 even before any update, biasing the
-        # gradient and degrading the policy. The actor's recompute is bit-identical to its own
-        # forward (verified single-process: ratio==1.0000), so old==new at the first update ->
-        # ratio==1. Correct for update_epoch==1 (our GRPO): ratio==1 gives the exact
-        # advantage-weighted group-relative policy gradient. (For update_epoch>1 the old
-        # log-prob should instead be recomputed once before the inner update loop.)
-        out["prev_logprobs"] = out["logprobs"].detach()
+        # The PPO/GRPO denominator is the behavior log-prob returned by rollout.
+        # Do not synthesize prev_logprobs here; doing so would silently make
+        # ratio == 1 and remove the behavior-policy importance correction.
         # values omitted for critic-free GRPO (values entries are None).
         if want_values:
             out["values"] = torch.cat(values, dim=0)
