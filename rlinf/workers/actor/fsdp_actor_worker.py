@@ -1263,6 +1263,7 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
                     global_step=int(getattr(self, "version", -1)),
                     out_dir=str(self.cfg.runner.logger.log_path),
                     task_ids=self.rollout_batch.get("task_ids", None),
+                    shard_id=int(getattr(self, "_rank", 0)),
                 )
             except Exception as _e:  # noqa: BLE001 - never break training on report errors
                 try:

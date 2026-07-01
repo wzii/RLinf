@@ -71,6 +71,7 @@ def write_per_rollout_report(
     global_step: int,
     out_dir: str,
     task_ids: Optional[torch.Tensor] = None,
+    shard_id: int = 0,
 ) -> Optional[str]:
     """Build the hierarchical per-rollout report string and append it to a file.
 
@@ -112,10 +113,15 @@ def write_per_rollout_report(
         tid = tid[:B] if tid.shape[0] >= B else None
 
     os.makedirs(out_dir, exist_ok=True)
-    path = os.path.join(out_dir, "per_rollout_report.txt")
+    # one file per rank/shard: under FSDP each rank holds a disjoint slice of the groups,
+    # so per-rank files are both race-free and complete (read all shards for every group).
+    path = os.path.join(out_dir, f"per_rollout_report_rank{shard_id}.txt")
     lines = []
     lines.append("=" * 78)
-    lines.append(f"GLOBAL STEP {global_step}  |  {n_groups} groups x {group_size} rollouts  (B={B})")
+    lines.append(
+        f"GLOBAL STEP {global_step}  |  rank/shard {shard_id}  |  "
+        f"{n_groups} group(s) x {group_size} rollouts  (B={B})"
+    )
     if not _SHAPES_LOGGED:
         lines.append(
             f"[shapes] rewards={tuple(rewards.shape)} "
