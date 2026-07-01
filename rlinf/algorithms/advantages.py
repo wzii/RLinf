@@ -114,7 +114,11 @@ def compute_grpo_advantages(
     )
 
     advantages = grouped_rewards - grouped_reward_mean
-    advantages = advantages / (grouped_reward_std + 1e-6)
+    # Standard GRPO normalizes by group std. Some embodied runs intentionally
+    # disable this to avoid amplifying one-off exploration failures in nearly
+    # saturated binary-reward groups.
+    if kwargs.get("grpo_norm_by_std", True):
+        advantages = advantages / (grouped_reward_std + 1e-6)
 
     advantages = (torch.zeros_like(loss_mask) + advantages.view(1, -1)) * loss_mask
 

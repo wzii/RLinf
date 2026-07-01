@@ -156,11 +156,16 @@ def retrieve_model_state_dict_in_cpu(model, offloaded_buffer=None):
             if name in offloaded_buffer:
                 offloaded_buffer[name].copy_(item.detach(), non_blocking=True)
             else:
-                item = (
-                    item.detach()
-                    .to(device="cpu", non_blocking=True, copy=True)
-                    .pin_memory()
+                item = item.detach().to(
+                    device="cpu", non_blocking=True, copy=True
                 )
+                try:
+                    item = item.pin_memory()
+                except (NotImplementedError, RuntimeError):
+                    # DTensor / sharded tensors (e.g. FSDP-wrapped FastWAM) don't
+                    # implement aten.is_pinned; pin_memory is a perf-only opt, so
+                    # skip it when unsupported (keeps the CPU copy as-is).
+                    pass
                 offloaded_buffer[name] = item
         else:
             offloaded_buffer[name] = item

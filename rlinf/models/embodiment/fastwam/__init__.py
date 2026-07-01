@@ -263,6 +263,7 @@ def get_model(cfg: DictConfig, torch_dtype=None) -> nn.Module:
             "enabled": True,
             "noise_level": float(rl.get("noise_level", 0.1)),
             "noise_method": str(rl.get("noise_method", "flow_sde")),
+            "sde_sampling": str(rl.get("sde_sampling", "single")),
             "train_video_expert": train_video_expert,
             "freeze_video_expert": not train_video_expert,
             "batched": bool(rl.get("batched", True)),
@@ -270,9 +271,10 @@ def get_model(cfg: DictConfig, torch_dtype=None) -> nn.Module:
         }
         logger.info(
             "FastWAM RL enabled: value_head=%s, noise_level=%.3f, noise_method=%s, "
-            "train_video_expert=%s, batched=%s",
+            "sde_sampling=%s, train_video_expert=%s, batched=%s",
             "yes" if use_value_head else "no (critic-free, e.g. GRPO)",
             rl_cfg["noise_level"], rl_cfg["noise_method"],
+            rl_cfg["sde_sampling"],
             rl_cfg["train_video_expert"], rl_cfg["batched"],
         )
 

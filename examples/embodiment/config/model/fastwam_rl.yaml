@@ -35,6 +35,7 @@ rl:
   noise_level: 0.1          # flow-SDE exploration std scale (per denoise step)
   noise_method: flow_sde    # "flow_sde" (principled reverse-SDE, matches OpenPI/GR00T)
                             #   or "simple" (legacy ODE mean + constant-scale noise)
+  sde_sampling: single      # "single" = one stochastic denoise step; "full" = all steps
   freeze_video_expert: true # train only the action expert + proprio + value head
   train_video_expert: false # set true (or freeze_video_expert: false) to also update
                             #   the 5B video expert (value-head grad flows through the

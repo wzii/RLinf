@@ -1407,6 +1407,7 @@ class EnvWorker(Worker):
             "reward_type": self.cfg.algorithm.reward_type,
             "loss_mask": rollout_batch.get("loss_mask", None),
             "loss_mask_sum": rollout_batch.get("loss_mask_sum", None),
+            "grpo_norm_by_std": self.cfg.algorithm.get("grpo_norm_by_std", True),
             "normalize_advantages": self.cfg.algorithm.get("normalize_advantages", True)
             and not self.use_training_pipeline,
         }
