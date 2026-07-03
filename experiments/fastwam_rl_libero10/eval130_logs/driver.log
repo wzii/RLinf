@@ -1,0 +1,71 @@
+==========================================================
+[02:55:16] RUN eval130_rl_long  suite=libero_10 hz=520 epochs=5  extra='runner.resume_dir=/workspace/results/lib10_rl_n6/lib10_rl_n6/checkpoints/global_step_10'
+==========================================================
+[03:29:01] DONE eval130_rl_long rc=0  (last log line:)
+[36m(RolloutGroup(rank=0) pid=37330)[0m Evaluating Rollout Epochs: 100%|██████████| 5/5 [24:43<00:00, 301.97s/it]Evaluating Rollout Epochs: 100%|██████████| 5/5 [24:43<00:00, 296.64s/it]
+  teardown round 1: total GPU MiB used=34102
+  teardown round 2: total GPU MiB used=0
+==========================================================
+[03:29:28] RUN eval130_base_long  suite=libero_10 hz=520 epochs=5  extra=''
+==========================================================
+[04:03:07] DONE eval130_base_long rc=0  (last log line:)
+[36m(RolloutGroup(rank=0) pid=65139)[0m Evaluating Rollout Epochs: 100%|██████████| 5/5 [23:49<00:00, 288.86s/it]Evaluating Rollout Epochs: 100%|██████████| 5/5 [23:49<00:00, 285.88s/it]
+  teardown round 1: total GPU MiB used=31588
+  teardown round 2: total GPU MiB used=0
+==========================================================
+[04:03:37] RUN eval130_base_spatial  suite=libero_spatial hz=240 epochs=5  extra=''
+==========================================================
+[04:26:27] DONE eval130_base_spatial rc=0  (last log line:)
+[36m(RolloutGroup(rank=0) pid=92132)[0m Evaluating Rollout Epochs: 100%|██████████| 5/5 [14:26<00:00, 179.00s/it]Evaluating Rollout Epochs: 100%|██████████| 5/5 [14:26<00:00, 173.24s/it]
+  teardown round 1: total GPU MiB used=31588
+  teardown round 2: total GPU MiB used=0
+==========================================================
+[04:26:56] RUN eval130_rl_spatial  suite=libero_spatial hz=240 epochs=5  extra='runner.resume_dir=/workspace/results/lib10_rl_n6/lib10_rl_n6/checkpoints/global_step_10'
+==========================================================
+[04:50:12] DONE eval130_rl_spatial rc=0  (last log line:)
+[36m(RolloutGroup(rank=0) pid=113226)[0m Evaluating Rollout Epochs: 100%|██████████| 5/5 [13:52<00:00, 173.71s/it]Evaluating Rollout Epochs: 100%|██████████| 5/5 [13:52<00:00, 166.51s/it]
+  teardown round 1: total GPU MiB used=34102
+  teardown round 2: total GPU MiB used=0
+==========================================================
+[04:50:40] RUN eval130_base_object  suite=libero_object hz=280 epochs=5  extra=''
+==========================================================
+[05:14:28] DONE eval130_base_object rc=0  (last log line:)
+[36m(RolloutGroup(rank=0) pid=134510)[0m Evaluating Rollout Epochs: 100%|██████████| 5/5 [14:10<00:00, 173.86s/it]Evaluating Rollout Epochs: 100%|██████████| 5/5 [14:10<00:00, 170.10s/it]
+  teardown round 1: total GPU MiB used=33079
+  teardown round 2: total GPU MiB used=0
+==========================================================
+[05:14:50] RUN eval130_rl_object  suite=libero_object hz=280 epochs=5  extra='runner.resume_dir=/workspace/results/lib10_rl_n6/lib10_rl_n6/checkpoints/global_step_10'
+==========================================================
+[05:38:09] DONE eval130_rl_object rc=0  (last log line:)
+[36m(RolloutGroup(rank=0) pid=156091)[0m Evaluating Rollout Epochs: 100%|██████████| 5/5 [14:36<00:00, 181.71s/it]Evaluating Rollout Epochs: 100%|██████████| 5/5 [14:36<00:00, 175.30s/it]
+  teardown round 1: total GPU MiB used=34102
+  teardown round 2: total GPU MiB used=0
+==========================================================
+[05:38:33] RUN eval130_base_goal  suite=libero_goal hz=300 epochs=5  extra=''
+==========================================================
+[06:03:08] DONE eval130_base_goal rc=0  (last log line:)
+[36m(RolloutGroup(rank=0) pid=177371)[0m Evaluating Rollout Epochs: 100%|██████████| 5/5 [15:57<00:00, 195.80s/it]Evaluating Rollout Epochs: 100%|██████████| 5/5 [15:57<00:00, 191.51s/it]
+  teardown round 1: total GPU MiB used=31588
+  teardown round 2: total GPU MiB used=0
+==========================================================
+[06:03:34] RUN eval130_rl_goal  suite=libero_goal hz=300 epochs=5  extra='runner.resume_dir=/workspace/results/lib10_rl_n6/lib10_rl_n6/checkpoints/global_step_10'
+==========================================================
+[06:28:06] DONE eval130_rl_goal rc=0  (last log line:)
+[36m(RolloutGroup(rank=0) pid=199376)[0m Evaluating Rollout Epochs: 100%|██████████| 5/5 [14:44<00:00, 181.08s/it]Evaluating Rollout Epochs: 100%|██████████| 5/5 [14:44<00:00, 176.95s/it]
+  teardown round 1: total GPU MiB used=34102
+  teardown round 2: total GPU MiB used=0
+==========================================================
+[06:28:33] RUN eval130_base_short  suite=libero_90 hz=240 epochs=45  extra=''
+==========================================================
+[09:03:35] DONE eval130_base_short rc=0  (last log line:)
+[36m(RolloutGroup(rank=0) pid=221344)[0m Evaluating Rollout Epochs: 100%|██████████| 45/45 [2:12:46<00:00, 174.34s/it]Evaluating Rollout Epochs: 100%|██████████| 45/45 [2:12:46<00:00, 177.03s/it]
+  teardown round 1: total GPU MiB used=31588
+  teardown round 2: total GPU MiB used=0
+==========================================================
+[09:04:08] RUN eval130_rl_short  suite=libero_90 hz=240 epochs=45  extra='runner.resume_dir=/workspace/results/lib10_rl_n6/lib10_rl_n6/checkpoints/global_step_10'
+==========================================================
+[11:36:21] DONE eval130_rl_short rc=0  (last log line:)
+[36m(RolloutGroup(rank=0) pid=317146)[0m Evaluating Rollout Epochs: 100%|██████████| 45/45 [2:13:11<00:00, 175.19s/it]Evaluating Rollout Epochs: 100%|██████████| 45/45 [2:13:11<00:00, 177.59s/it]
+  teardown round 1: total GPU MiB used=34102
+  teardown round 2: total GPU MiB used=0
+ALL EVAL130 RUNS COMPLETE at 11:36:56
