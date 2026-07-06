@@ -1,0 +1,28 @@
+model_type: "versa_vla"
+
+# Model path - set in the specific experiment config (point to a VersaVLA0
+# HF checkpoint directory whose config.json has model_type "VersaVLA0").
+model_path: "/path/to/model/versa_vla"
+
+# VersaVLA runs in its own dtype (Qwen3-VL bf16 + action head bf16); precision
+# here is only used by RLinf for FSDP mixed-precision bookkeeping.
+precision: "bfloat16"
+
+# Action and chunk settings (LIBERO: 7-DoF delta, chunk=10 by default).
+action_dim: 7
+num_action_chunks: 10
+
+# Flow-matching denoise steps used at inference.
+denoise_steps: 5
+
+# VersaVLA-specific parameters.
+versa_vla:
+  # Dataset repo id used to resolve normalization stats
+  # (e.g. "<data_mixture>_merged_stats.*.json"). Must match the checkpoint's
+  # training mixture.
+  repo_id: "libero_all_pi_v3.0"
+  data_mixture_name: "LIBERO-ALL-PI_3.0"
+  target_action_space: "delta"
+  # Precision preset passed to VersaVLA PolicyRuntimeArgs:
+  # inherit | uniform | bf16 | mixed_bf16_fp32 | fp32
+  precision_preset: "bf16"

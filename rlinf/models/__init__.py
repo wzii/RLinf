@@ -61,6 +61,11 @@ def _register_builtin_models():
 
         return get_model(cfg, torch_dtype)
 
+    def _build_versa_vla(cfg: DictConfig, torch_dtype):
+        from rlinf.models.embodiment.versatile_vla import get_model
+
+        return get_model(cfg, torch_dtype)
+
     def _build_dexbotic_pi(cfg: DictConfig, torch_dtype):
         from rlinf.models.embodiment.dexbotic_pi import get_model
 
@@ -151,6 +156,12 @@ def _register_builtin_models():
     register_model(
         SupportedModel.OPENPI.value,
         _build_openpi,
+        category="embodied",
+        force=True,
+    )
+    register_model(
+        SupportedModel.VERSA_VLA.value,
+        _build_versa_vla,
         category="embodied",
         force=True,
     )
